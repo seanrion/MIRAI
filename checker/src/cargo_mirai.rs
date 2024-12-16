@@ -26,21 +26,26 @@ pub fn main() {
         println!("{CARGO_MIRAI_HELP}");
         return;
     }
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        let version_info = rustc_tools_util::get_version_info!();
-        println!("{version_info}");
-        return;
-    }
+
 
     match std::env::args().nth(1).as_ref().map(AsRef::<str>::as_ref) {
         Some(s) if s.ends_with("mirai") => {
             // Get here for the top level cargo execution, i.e. "cargo mirai".
+            if std::env::args().any(|a| a == "--version" || a == "-V") {
+                let version_info = rustc_tools_util::get_version_info!();
+                println!("{version_info}");
+                return;
+            }
             call_cargo();
         }
         Some(s) if s.ends_with("rustc") => {
             // 'cargo rustc ..' redirects here because RUSTC_WRAPPER points to this binary.
             // execute rustc with MIRAI applicable parameters for dependencies and call MIRAI
             // to analyze targets in the current package.
+            if std::env::args().any(|a| a == "--version" || a == "-V") {
+                call_rustc();
+                return;
+            }
             call_rustc_or_mirai();
         }
         Some(arg) => {
@@ -224,10 +229,14 @@ fn call_mirai() {
 }
 
 fn call_rustc() {
-    // todo: invoke the rust compiler for the appropriate tool chain?
-    let mut cmd =
-        Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc")));
-    cmd.args(std::env::args().skip(2));
+    let mut args = std::env::args_os().skip(1);
+    // The rustc to use is passed by Cargo as the first argument to RUSTC_WRAPPER
+    let mut cmd = Command::new(
+        args.next()
+            .or_else(|| std::env::var_os("RUSTC"))
+            .unwrap_or_else(|| OsString::from("rustc")),
+    );
+    cmd.args(args);
     let exit_status = cmd
         .spawn()
         .expect("could not run rustc")

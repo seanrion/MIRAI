@@ -27,7 +27,7 @@ use rustc_span::source_map::Spanned;
 use rustc_target::abi::{FieldIdx, Primitive, TagEncoding, VariantIdx, Variants};
 use rustc_trait_selection::infer::TyCtxtInferExt;
 
-use crate::abstract_value::{AbstractValue, AbstractValueTrait, BOTTOM};
+use crate::abstract_value::{self, AbstractValue, AbstractValueTrait, BOTTOM};
 use crate::body_visitor::BodyVisitor;
 use crate::call_visitor::CallVisitor;
 use crate::constant_domain::{ConstantDomain, FunctionReference};
@@ -43,7 +43,6 @@ use crate::summaries::Precondition;
 use crate::tag_domain::Tag;
 use crate::type_visitor::TypeVisitor;
 use crate::utils;
-use crate::{abstract_value, known_names};
 
 /// Holds the state for the basic block visitor
 pub struct BlockVisitor<'block, 'analysis, 'compilation, 'tcx> {
@@ -722,7 +721,6 @@ impl<'block, 'analysis, 'compilation, 'tcx> BlockVisitor<'block, 'analysis, 'com
             .block_to_call
             .insert(current_location, callee_def_id);
 
-        let tcx = self.bv.tcx;
         let mut call_visitor = CallVisitor::new(
             self,
             callee_def_id,
@@ -753,7 +751,6 @@ impl<'block, 'analysis, 'compilation, 'tcx> BlockVisitor<'block, 'analysis, 'com
                     .already_reported_errors_for_call_to
                     .insert(call_visitor.callee_fun_val.clone())
             {
-                let _kn = known_names::KnownNamesCache::get_known_name_for(tcx, callee_def_id);
                 call_visitor.block_visitor.report_missing_summary();
                 if known_name != KnownNames::StdCloneClone
                     && !call_visitor.block_visitor.bv.analysis_is_incomplete
@@ -1736,9 +1733,6 @@ impl<'block, 'analysis, 'compilation, 'tcx> BlockVisitor<'block, 'analysis, 'com
             mir::Rvalue::ThreadLocalRef(def_id) => {
                 self.visit_thread_local_ref(path, *def_id);
             }
-            mir::Rvalue::Len(place) => {
-                self.visit_len(path, place);
-            }
             mir::Rvalue::Cast(cast_kind, operand, ty) => {
                 let specialized_ty = self
                     .type_visitor()
@@ -2042,54 +2036,6 @@ impl<'block, 'analysis, 'compilation, 'tcx> BlockVisitor<'block, 'analysis, 'com
         };
         self.bv
             .update_value_at(path, AbstractValue::make_reference(static_var));
-    }
-
-    /// path = length of a [X] or [X;n] value.
-    #[logfn_inputs(TRACE)]
-    fn visit_len(&mut self, path: Rc<Path>, place: &mir::Place<'tcx>) {
-        let place_ty = self
-            .type_visitor()
-            .get_rustc_place_type(place, self.bv.current_span);
-        let len_value = if let TyKind::Array(_, len) = place_ty.kind() {
-            // We only get here if "-Z mir-opt-level=0" was specified.
-            // With more optimization the len instruction becomes a constant.
-            self.visit_const(len)
-        } else {
-            // In this case place type must be a slice.
-            let mut value_path = self.visit_lh_place(place);
-            if let PathEnum::QualifiedPath {
-                qualifier,
-                selector,
-                ..
-            } = &value_path.value
-            {
-                if let PathSelector::Deref = selector.as_ref() {
-                    // De-referencing a slice pointer is normally the same as de-referencing its
-                    // thin pointer, so self.visit_lh_place above assumed that much and will have
-                    // added in a field 0 selector before the deref.
-                    // In this context, however, we want the length of the slice pointer,
-                    // so we need to drop the thin pointer field selector.
-                    if let PathEnum::QualifiedPath {
-                        qualifier,
-                        selector,
-                        ..
-                    } = &qualifier.value
-                    {
-                        if matches!(selector.as_ref(), PathSelector::Field(0)) {
-                            value_path = qualifier.clone();
-                        }
-                    }
-                } else {
-                    // qualifier is an unsized struct type and selector selects the last field,
-                    // which is an unsized array
-                }
-            }
-            let length_path =
-                Path::new_length(value_path).canonicalize(&self.bv.current_environment);
-            self.bv
-                .lookup_path_and_refine_result(length_path, self.bv.tcx.types.usize)
-        };
-        self.bv.update_value_at(path, len_value);
     }
 
     /// path = operand as ty.
@@ -3762,6 +3708,12 @@ impl<'block, 'analysis, 'compilation, 'tcx> BlockVisitor<'block, 'analysis, 'com
         let discr_ty_layout = self.type_visitor().layout_of(discr_ty).unwrap();
         trace!("discr_ty_layout {:?}", discr_ty_layout);
         match enum_ty_layout.variants {
+            Variants::Empty => {
+                discr_signed = false;
+                discr_bits = 0;
+                discr_index = VariantIdx::new(0);
+                discr_has_data = false;
+            }
             Variants::Single { index } => {
                 // The enum only contains one variant.
 
